@@ -5,7 +5,7 @@ import { useSocket } from "@/context/SocketContext";
 
 export interface ChatMessage {
   id: string;
-  alias: string;
+  username: string;
   text: string;
   at: number;
   isOwn?: boolean;
@@ -30,18 +30,17 @@ function nextId(): string {
 }
 
 export function useRoom(roomId: string): UseRoomReturn {
-  const { socket } = useSocket();
+  const { socket, isConnected } = useSocket();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [systemMessages, setSystemMessages] = useState<SystemMessage[]>([]);
   const [isJoined, setIsJoined] = useState(false);
   const joinedRef = useRef(false);
 
   useEffect(() => {
-    if (!socket || !roomId) return;
+    if (!socket || !isConnected || !roomId) return;
 
-    // Join the room
-    socket.emit("room:join", { roomId });
-
+    // Listeners setup FIRST (fixes race condition)
+    
     // Listen for join confirmation
     const onJoined = (data: { roomId: string }) => {
       if (data.roomId === roomId) {
@@ -51,33 +50,49 @@ export function useRoom(roomId: string): UseRoomReturn {
     };
 
     // Incoming chat messages from others
-    const onMessage = (data: { alias: string; text: string; at: number }) => {
+    const onMessage = (data: { username: string; text: string; at: number }) => {
       setMessages((prev) => [
         ...prev,
-        { id: nextId(), alias: data.alias, text: data.text, at: data.at },
+        { id: nextId(), username: data.username, text: data.text, at: data.at },
       ]);
     };
 
     // User joined notification
-    const onUserJoined = (data: { alias: string }) => {
+    const onUserJoined = (data: { username: string }) => {
       setSystemMessages((prev) => [
         ...prev,
-        { id: nextId(), text: `${data.alias} joined`, at: Date.now() },
+        { id: nextId(), text: `${data.username} joined`, at: Date.now() },
       ]);
     };
 
     // User left notification
-    const onUserLeft = (data: { alias: string }) => {
+    const onUserLeft = (data: { username: string }) => {
       setSystemMessages((prev) => [
         ...prev,
-        { id: nextId(), text: `${data.alias} left`, at: Date.now() },
+        { id: nextId(), text: `${data.username} left`, at: Date.now() },
       ]);
+    };
+
+    // Error handler with retry logic for failed joins
+    const onError = (data: { code: string }) => {
+      if (data.code === "JOIN_FAILED" || data.code === "INVALID_ROOM_ID") {
+        // Retry join once after 1 second
+        setTimeout(() => {
+          if (socket.connected) {
+            socket.emit("room:join", { roomId });
+          }
+        }, 1000);
+      }
     };
 
     socket.on("room:joined", onJoined);
     socket.on("room:message", onMessage);
     socket.on("room:user_joined", onUserJoined);
     socket.on("room:user_left", onUserLeft);
+    socket.on("room:error", onError);
+
+    // Socket is connected and listeners attached — join now
+    socket.emit("room:join", { roomId });
 
     return () => {
       // Leave room on unmount
@@ -88,10 +103,11 @@ export function useRoom(roomId: string): UseRoomReturn {
       socket.off("room:message", onMessage);
       socket.off("room:user_joined", onUserJoined);
       socket.off("room:user_left", onUserLeft);
+      socket.off("room:error", onError);
       setIsJoined(false);
       joinedRef.current = false;
     };
-  }, [socket, roomId]);
+  }, [socket, isConnected, roomId]);
 
   const sendMessage = useCallback(
     (text: string) => {
@@ -108,7 +124,7 @@ export function useRoom(roomId: string): UseRoomReturn {
         ...prev,
         {
           id: nextId(),
-          alias: "You",
+          username: "You",
           text: trimmed,
           at: Date.now(),
           isOwn: true,

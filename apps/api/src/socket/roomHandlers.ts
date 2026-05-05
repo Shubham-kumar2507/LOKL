@@ -4,11 +4,16 @@ import {
   incrementMember,
   decrementMember,
 } from "../services/roomService";
+import { checkContent } from "../utils/moderation";
 
 // ── Extended socket type ─────────────────────────────
 export interface AuthenticatedSocket extends Socket {
-  user: { uuid: string; alias: string; role: string };
+  user: { userId: string; username: string };
   currentRooms: Set<string>;
+  /** Timestamp until which the socket is muted (content policy) */
+  mutedUntil?: number;
+  /** Number of content policy violations this session */
+  contentViolations?: number;
 }
 
 // ── Register room event handlers ─────────────────────
@@ -18,35 +23,45 @@ export function registerRoomHandlers(
 ) {
   // ── room:join ────────────────────────────────────────
   socket.on("room:join", async ({ roomId }: { roomId: string }) => {
-    // 1. Validate roomId is a valid MongoDB ObjectId string
-    if (!mongoose.Types.ObjectId.isValid(roomId)) {
-      socket.emit("error", { code: "INVALID_ROOM_ID" });
-      return;
-    }
-
-    // 2. Join the Socket.io room (always succeeds, no DB needed)
-    socket.join(roomId);
-
-    // 3. Notify others in the room
-    socket.to(roomId).emit("room:user_joined", {
-      alias: socket.user.alias,
-    });
-
-    // 4. Confirm back to sender
-    socket.emit("room:joined", { roomId });
-
-    // 5. Track for cleanup on disconnect
-    socket.currentRooms.add(roomId);
-
-    console.log(
-      `[room:join] ${socket.user.alias} joined ${roomId}`
-    );
-
-    // 6. Increment member count (best-effort, non-blocking)
     try {
-      await incrementMember(roomId);
+      // 1. Validate roomId
+      if (!roomId || !mongoose.Types.ObjectId.isValid(roomId)) {
+        socket.emit("room:error", { code: "INVALID_ROOM_ID" });
+        return;
+      }
+
+      // 2. Join the Socket.io room FIRST (before any DB calls)
+      //    This ensures messaging works even if DB is slow/down
+      socket.join(roomId);
+
+      // 3. Track for cleanup on disconnect
+      socket.currentRooms.add(roomId);
+
+      // 4. Confirm join back to sender IMMEDIATELY
+      socket.emit("room:joined", { roomId });
+
+      // 5. Notify others in the room
+      socket.to(roomId).emit("room:user_joined", {
+        username: socket.user.username,
+      });
+
+      // 6. Debug log — shows room membership in real time
+      console.log(
+        `Socket ${socket.id} (${socket.user.username}) joined room ${roomId}. Room now has:`,
+        io.sockets.adapter.rooms.get(roomId)?.size,
+        "members"
+      );
+
+      // 7. Increment member count (fire-and-forget, non-blocking)
+      incrementMember(roomId).catch((err) => {
+        console.warn(
+          "[room:join] DB member increment failed (non-fatal):",
+          (err as Error).message
+        );
+      });
     } catch (err) {
-      console.warn("[room:join] DB member increment failed (non-fatal):", (err as Error).message);
+      console.error("[room:join] Unexpected error:", err);
+      socket.emit("room:error", { code: "JOIN_FAILED" });
     }
   });
 
@@ -57,44 +72,74 @@ export function registerRoomHandlers(
 
     // 2. Notify others
     socket.to(roomId).emit("room:user_left", {
-      alias: socket.user.alias,
+      username: socket.user.username,
     });
 
     // 3. Remove from tracking
     socket.currentRooms.delete(roomId);
 
-    console.log(
-      `[room:leave] ${socket.user.alias} left ${roomId}`
-    );
-
     // 4. Decrement member count (best-effort)
-    try {
-      await decrementMember(roomId);
-    } catch (err) {
-      console.warn("[room:leave] DB member decrement failed (non-fatal):", (err as Error).message);
-    }
+    decrementMember(roomId).catch((err) => {
+      console.warn(
+        "[room:leave] DB member decrement failed (non-fatal):",
+        (err as Error).message
+      );
+    });
   });
 
   // ── room:message ─────────────────────────────────────
   socket.on(
     "room:message",
-    ({ roomId, text }: { roomId: string; text: string }) => {
-      // 1. Validate text
+    async ({ roomId, text }: { roomId: string; text: string }) => {
+      // 1. Check socket is actually in this room
+      if (!socket.currentRooms.has(roomId)) {
+        socket.emit("room:error", { code: "NOT_IN_ROOM" });
+        return;
+      }
+
+      // 2. Validate text
       if (
         !text ||
         typeof text !== "string" ||
         text.trim().length === 0 ||
         text.length > 500
       ) {
-        socket.emit("error", { code: "INVALID_MESSAGE" });
+        socket.emit("room:error", { code: "INVALID_MESSAGE" });
         return;
       }
 
       const trimmed = text.trim();
 
-      // 2. Broadcast to room (excluding sender — sender adds it locally)
+      // 3. Check if socket is temporarily muted
+      if (socket.mutedUntil && Date.now() < socket.mutedUntil) {
+        const remainingSec = Math.ceil((socket.mutedUntil - Date.now()) / 1000);
+        socket.emit("room:message_blocked", {
+          reason: "MUTED",
+          remainingSec,
+        });
+        return;
+      }
+
+      // 4. Content moderation (public room messages only — NEVER on DM messages)
+      try {
+        const modResult = await checkContent(trimmed);
+        if (modResult.flagged) {
+          socket.emit("room:message_blocked", { reason: "CONTENT_POLICY" });
+
+          // Track violations and mute on second offense
+          socket.contentViolations = (socket.contentViolations || 0) + 1;
+          if (socket.contentViolations >= 2) {
+            socket.mutedUntil = Date.now() + 60_000; // 60 second mute
+          }
+          return;
+        }
+      } catch {
+        // If moderation fails, allow the message through (fail-open)
+      }
+
+      // 5. Broadcast to room (excluding sender — sender adds it locally)
       socket.to(roomId).emit("room:message", {
-        alias: socket.user.alias,
+        username: socket.user.username,
         text: trimmed,
         at: Date.now(),
       });
@@ -105,25 +150,19 @@ export function registerRoomHandlers(
 
   // ── disconnect ───────────────────────────────────────
   socket.on("disconnect", async () => {
-    console.log(
-      `[disconnect] ${socket.user.alias} (${socket.id}) — cleaning up ${socket.currentRooms.size} room(s)`
-    );
-
     for (const roomId of socket.currentRooms) {
       // Notify room members (always)
       socket.to(roomId).emit("room:user_left", {
-        alias: socket.user.alias,
+        username: socket.user.username,
       });
 
       // Decrement member count (best-effort)
-      try {
-        await decrementMember(roomId);
-      } catch (err) {
+      decrementMember(roomId).catch((err) => {
         console.warn(
           `[disconnect] DB decrement failed for ${roomId} (non-fatal):`,
           (err as Error).message
         );
-      }
+      });
     }
   });
 }

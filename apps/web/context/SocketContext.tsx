@@ -5,7 +5,6 @@ import React, {
   useContext,
   useEffect,
   useState,
-  useRef,
 } from "react";
 import { io, Socket } from "socket.io-client";
 
@@ -33,46 +32,42 @@ export function SocketProvider({
   token: string | null;
   children: React.ReactNode;
 }) {
+  const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
     if (!token) return;
 
     // Create socket connection with auth token
-    const socket = io(SOCKET_URL, {
+    const s = io(SOCKET_URL, {
       auth: { token },
       transports: ["websocket", "polling"],
     });
 
-    socketRef.current = socket;
+    // Store in state so context consumers re-render
+    setSocket(s);
 
-    socket.on("connect", () => {
-      console.log("[socket] connected:", socket.id);
+    s.on("connect", () => {
       setIsConnected(true);
     });
 
-    socket.on("disconnect", (reason) => {
-      console.log("[socket] disconnected:", reason);
+    s.on("disconnect", (reason) => {
       setIsConnected(false);
     });
 
-    socket.on("connect_error", (err) => {
-      console.error("[socket] connection error:", err.message);
+    s.on("connect_error", (err) => {
       setIsConnected(false);
     });
 
     return () => {
-      socket.disconnect();
-      socketRef.current = null;
+      s.disconnect();
+      setSocket(null);
       setIsConnected(false);
     };
   }, [token]);
 
   return (
-    <SocketContext.Provider
-      value={{ socket: socketRef.current, isConnected }}
-    >
+    <SocketContext.Provider value={{ socket, isConnected }}>
       {children}
     </SocketContext.Provider>
   );

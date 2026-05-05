@@ -7,7 +7,7 @@ const RoomSchema = new mongoose.Schema({
     coordinates: { type: [Number], required: true }, // [longitude, latitude]
   },
   memberCount: { type: Number, default: 0, min: 0 },
-  createdBy: { type: String, required: true }, // UUID only, never a real name
+  createdBy: { type: String, required: true }, // userId
   createdAt: { type: Date, default: Date.now },
 });
 

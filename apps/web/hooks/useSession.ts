@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 
 export interface Session {
-  uuid: string;
-  alias: string;
+  userId: string;
+  username: string;
   token: string;
 }
 
@@ -12,29 +13,32 @@ interface UseSessionReturn {
   session: Session | null;
   isLoading: boolean;
   error: string | null;
+  setSession: (session: Session | null) => void;
+  logout: () => void;
 }
 
 const STORAGE_KEY = "lokl_token";
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 export function useSession(): UseSessionReturn {
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSessionState] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
 
-  const mintSession = useCallback(async (): Promise<Session> => {
-    const res = await fetch(`${API_URL}/api/auth/session`, {
-      method: "POST",
-    });
-
-    if (!res.ok) {
-      throw new Error("Failed to mint session");
+  const setSession = useCallback((newSession: Session | null) => {
+    if (newSession) {
+      localStorage.setItem(STORAGE_KEY, newSession.token);
+    } else {
+      localStorage.removeItem(STORAGE_KEY);
     }
-
-    const data: Session = await res.json();
-    localStorage.setItem(STORAGE_KEY, data.token);
-    return data;
+    setSessionState(newSession);
   }, []);
+
+  const logout = useCallback(() => {
+    setSession(null);
+    router.push("/login");
+  }, [router, setSession]);
 
   const verifyToken = useCallback(
     async (token: string): Promise<Session | null> => {
@@ -44,13 +48,12 @@ export function useSession(): UseSessionReturn {
         });
 
         if (!res.ok) {
-          // Token expired or invalid — clear it
           localStorage.removeItem(STORAGE_KEY);
           return null;
         }
 
         const data = await res.json();
-        return { uuid: data.uuid, alias: data.alias, token };
+        return { userId: data.userId, username: data.username, token };
       } catch {
         localStorage.removeItem(STORAGE_KEY);
         return null;
@@ -67,20 +70,14 @@ export function useSession(): UseSessionReturn {
         const storedToken = localStorage.getItem(STORAGE_KEY);
 
         if (storedToken) {
-          // Step 2: Verify existing token
           const verified = await verifyToken(storedToken);
-          if (!cancelled && verified) {
-            setSession(verified);
-            setIsLoading(false);
-            return;
-          }
-        }
-
-        // Step 3: No token or invalid — mint a new session
-        if (!cancelled) {
-          const newSession = await mintSession();
           if (!cancelled) {
-            setSession(newSession);
+            setSessionState(verified);
+          }
+        } else {
+          // No token means no session, user must log in
+          if (!cancelled) {
+            setSessionState(null);
           }
         }
       } catch (err) {
@@ -98,7 +95,7 @@ export function useSession(): UseSessionReturn {
     return () => {
       cancelled = true;
     };
-  }, [mintSession, verifyToken]);
+  }, [verifyToken]);
 
-  return { session, isLoading, error };
+  return { session, isLoading, error, setSession, logout };
 }

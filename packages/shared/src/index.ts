@@ -4,12 +4,13 @@ export {
   SessionSchema,
   DMRequestSchema,
   CoordSchema,
-} from "./schemas";
-
-export type {
-  Room,
-  Message,
-  Session,
-  DMRequest,
-  Coord,
+  SignupSchema,
+  LoginSchema,
+  type Room,
+  type Message,
+  type Session,
+  type DMRequest,
+  type Coord,
+  type Signup,
+  type Login,
 } from "./schemas";

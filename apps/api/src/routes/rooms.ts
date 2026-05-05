@@ -1,4 +1,5 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, IRouter } from "express";
+import mongoose from "mongoose";
 import rateLimit from "express-rate-limit";
 import { CoordSchema, RoomSchema } from "@lokl/shared";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
@@ -9,7 +10,7 @@ import {
   getRoomById,
 } from "../services/roomService";
 
-const router = Router();
+const router: IRouter = Router();
 
 // ── Rate Limiters ──────────────────────────────────────
 const nearbyLimiter = rateLimit({
@@ -45,7 +46,7 @@ router.get("/nearby", nearbyLimiter, async (req: Request, res: Response) => {
     const rooms = await getNearbyRooms(lng, lat);
     res.json({ rooms });
   } catch (err) {
-    console.error("Error fetching nearby rooms:", err);
+    console.error("Error fetching nearby rooms:", (err as Error).message);
     res.status(500).json({ error: "INTERNAL_ERROR" });
   }
 });
@@ -59,10 +60,10 @@ router.post(
   async (req: AuthRequest, res: Response) => {
     try {
       const { alias, lat, lng } = req.body;
-      const room = await createRoom(alias, lng, lat, req.user!.uuid);
+      const room = await createRoom(alias, lng, lat, req.user!.userId);
       res.status(201).json({ room });
     } catch (err) {
-      console.error("Error creating room:", err);
+      console.error("Error creating room:", (err as Error).message);
       res.status(500).json({ error: "INTERNAL_ERROR" });
     }
   }
@@ -72,6 +73,13 @@ router.post(
 router.get("/:roomId", async (req: Request, res: Response) => {
   try {
     const roomId = req.params.roomId as string;
+
+    // Validate roomId is a valid MongoDB ObjectId
+    if (!mongoose.Types.ObjectId.isValid(roomId)) {
+      res.status(400).json({ error: "INVALID_ROOM_ID" });
+      return;
+    }
+
     const room = await getRoomById(roomId);
     if (!room) {
       res.status(404).json({ error: "ROOM_NOT_FOUND" });
@@ -79,7 +87,7 @@ router.get("/:roomId", async (req: Request, res: Response) => {
     }
     res.json({ room });
   } catch (err) {
-    console.error("Error fetching room:", err);
+    console.error("Error fetching room:", (err as Error).message);
     res.status(500).json({ error: "INTERNAL_ERROR" });
   }
 });

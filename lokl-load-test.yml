@@ -1,0 +1,57 @@
+config:
+  target: "http://localhost:80"
+  phases:
+    - duration: 60
+      arrivalRate: 10
+      name: "Warm up"
+    - duration: 120
+      arrivalRate: 30
+      rampTo: 100
+      name: "Ramp up"
+    - duration: 180
+      arrivalRate: 100
+      name: "Sustained load"
+  engines:
+    socketio:
+      transports: ["websocket"]
+      path: "/socket.io/"
+      extraHeaders:
+        Origin: "http://localhost:80"
+
+scenarios:
+  # ── Scenario 1: REST API — room discovery ─────────────
+  - name: "Room discovery flow"
+    flow:
+      - post:
+          url: "/api/auth/session"
+          capture:
+            - json: "$.token"
+              as: "token"
+            - json: "$.alias"
+              as: "alias"
+      - get:
+          url: "/api/rooms/nearby?lat=28.6139&lng=77.2090"
+          headers:
+            Authorization: "Bearer {{ token }}"
+
+  # ── Scenario 2: WebSocket — join, chat, leave ─────────
+  - name: "User joins room and sends messages"
+    engine: socketio
+    flow:
+      - emit:
+          channel: "room:join"
+          data:
+            roomId: "{{ $processEnvironment.TEST_ROOM_ID }}"
+      - think: 2
+      - loop:
+          - emit:
+              channel: "room:message"
+              data:
+                roomId: "{{ $processEnvironment.TEST_ROOM_ID }}"
+                text: "Load test message {{ $loopCount }}"
+          - think: 3
+        count: 10
+      - emit:
+          channel: "room:leave"
+          data:
+            roomId: "{{ $processEnvironment.TEST_ROOM_ID }}"
